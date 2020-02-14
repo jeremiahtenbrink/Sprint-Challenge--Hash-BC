@@ -1,6 +1,6 @@
 import hashlib
 import requests
-
+import multiprocessing
 import sys
 
 from uuid import uuid4
@@ -10,7 +10,7 @@ from timeit import default_timer as timer
 import random
 
 
-def proof_of_work(last_proof):
+def proof_of_work(last_proof, i, valid_guesses):
     """
     Multi-Ouroboros of Work Algorithm
     - Find a number p' such that the last six digits of hash(p) are equal
@@ -21,13 +21,21 @@ def proof_of_work(last_proof):
     """
 
     start = timer()
+    last_hash = f"{last_proof}".encode()
+    last_hash = hashlib.sha256(last_hash).hexdigest()
 
-    print("Searching for next proof")
-    proof = 0
-    #  TODO: Your code here
+    print(f"Searching for next proof thread {i}")
+    proof = i * 1000000000 + 679
+    not_valid = True
+    while not_valid:
+        if valid_proof(last_hash, proof):
+            not_valid = False
+        else:
+            proof += 1
+    valid_guesses[i] = proof
 
-    print("Proof found: " + str(proof) + " in " + str(timer() - start))
-    return proof
+    print("Proof found: " + str(proof) + " in " + str(
+        timer() - start) + f" on thread {i}")
 
 
 def valid_proof(last_hash, proof):
@@ -38,9 +46,16 @@ def valid_proof(last_hash, proof):
 
     IE:  last_hash: ...AE9123456, new hash 123456E88...
     """
+    proof = f"{proof}".encode()
 
-    # TODO: Your code here!
-    pass
+    proof_hash = hashlib.sha256(proof).hexdigest()
+    last_6 = last_hash[-6:]
+    first_6 = proof_hash[:6]
+    if first_6 == last_6:
+
+        return last_6 == first_6
+    else:
+        return False
 
 
 if __name__ == '__main__':
@@ -48,7 +63,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         node = sys.argv[1]
     else:
-        node = "https://lambda-coin.herokuapp.com/api"
+        node = "https://lambda-coin-test-1.herokuapp.com/api"
 
     coins_mined = 0
 
@@ -64,15 +79,52 @@ if __name__ == '__main__':
     # Run forever until interrupted
     while True:
         # Get the last proof from the server
-        r = requests.get(url=node + "/last_proof")
-        data = r.json()
-        new_proof = proof_of_work(data.get('proof'))
+        r = requests.get(url = node + "/last_proof")
+        try:
+            data = r.json()
+        except ValueError:
+            print("Error:  Non-json response")
+            print("Response returned:")
+            print(r)
+            continue
 
-        post_data = {"proof": new_proof,
+        threads = []
+
+        manager = multiprocessing.Manager()
+        valid_guesses = manager.dict()
+        for i in range(6):
+            thread = multiprocessing.Process(target = proof_of_work,
+                                             args = (data['proof'], i,
+                                                     valid_guesses))
+            threads.append(thread)
+            thread.start()
+
+        valid_guess = False
+
+        while not valid_guess:
+            for proc in threads:
+                if not proc.is_alive():
+                    valid_guess = True
+
+        for proc in threads:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+
+        valid_guess = valid_guesses.values()
+        proof = valid_guess[0]
+
+        post_data = {"proof": proof,
                      "id": id}
 
-        r = requests.post(url=node + "/mine", json=post_data)
-        data = r.json()
+        r = requests.post(url = node + "/mine", json = post_data)
+        try:
+            data = r.json()
+        except ValueError:
+            print("Error:  Non-json response")
+            print("Response returned:")
+            print(r)
+            continue
         if data.get('message') == 'New Block Forged':
             coins_mined += 1
             print("Total coins mined: " + str(coins_mined))
