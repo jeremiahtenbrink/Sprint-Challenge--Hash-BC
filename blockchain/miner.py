@@ -2,12 +2,20 @@ import hashlib
 import requests
 import multiprocessing
 import sys
+import time
+import random
 
 from uuid import uuid4
 
 from timeit import default_timer as timer
 
 import random
+
+threads = []
+process_timer = "None"
+block = None
+valid_guesses = None
+manager = None
 
 
 def proof_of_work(last_proof, i, valid_guesses):
@@ -24,8 +32,7 @@ def proof_of_work(last_proof, i, valid_guesses):
     last_hash = f"{last_proof}".encode()
     last_hash = hashlib.sha256(last_hash).hexdigest()
 
-    print(f"Searching for next proof thread {i}")
-    proof = i * 1000000000 + 679
+    proof = i * 1000000000 + random.randint(0, 500000)
     not_valid = True
     while not_valid:
         if valid_proof(last_hash, proof):
@@ -58,8 +65,106 @@ def valid_proof(last_hash, proof):
         return False
 
 
+def time_process():
+    time.sleep(8)
+
+
+def get_request():
+    got_response = False
+    while not got_response:
+        r = requests.get(url = node + "/last_proof")
+        try:
+            data = r.json()
+            block = data['proof']
+            got_response = True
+        except ValueError:
+            print("Error:  Non-json response")
+            print("Response returned:")
+            print(r)
+            continue
+
+    return block
+
+
+def start_loop():
+    # Run forever until interrupted
+    global threads
+    global process_timer
+    global block
+    global valid_guesses
+    global manager
+    if manager == None:
+        manager = multiprocessing.Manager()
+    # Get the last proof from the server
+    new_block = get_request()
+    changed_block = False
+    if block != new_block:
+        print('New block found!');
+        changed_block = True
+        block = new_block
+    else:
+        print('No new block found. Continuing to mine.')
+
+    if process_timer is not "None" and process_timer.is_alive():
+        process_timer.terminate()
+
+    if changed_block:
+        print("Stopping all prev threads")
+        valid_guesses = manager.dict()
+        for proc in threads:
+            if proc.is_alive:
+                proc.terminate()
+        print('Starting new threads.')
+        for i in range(6):
+            thread = multiprocessing.Process(target = proof_of_work,
+                                             args = (block, i,
+                                                     valid_guesses))
+            threads.append(thread)
+            thread.start()
+
+    process_timer = multiprocessing.Process(target = time_process())
+
+    valid_guess = False
+    reset = False
+    while not valid_guess and not reset:
+        for proc in threads:
+            if valid_guess:
+                break
+            if not proc.is_alive():
+                valid_guess = True
+                if process_timer.is_alive():
+                    process_timer.terminate()
+
+        if not process_timer.is_alive() and not valid_guess:
+            for proc in threads:
+                if valid_guess:
+                    break
+                if not proc.is_alive():
+                    valid_guess = True
+                    if process_timer.is_alive():
+                        process_timer.terminate()
+                        break
+
+            if valid_guess:
+                if process_timer.is_alive():
+                    process_timer.terminate()
+            else:
+                reset = True
+                break
+
+    if (reset and not valid_guess) or len(valid_guesses.values()) == 0:
+        print('timed out. Checking for new block')
+        return "reset"
+
+    valid_guess = valid_guesses.values()
+    proof = valid_guess[0]
+    return proof
+
+
 if __name__ == '__main__':
     # What node are we interacting with?
+    seed = time.gmtime()
+    random.seed(seed.tm_sec)
     if len(sys.argv) > 1:
         node = sys.argv[1]
     else:
@@ -76,57 +181,26 @@ if __name__ == '__main__':
     if id == 'NONAME\n':
         print("ERROR: You must change your name in `my_id.txt`!")
         exit()
-    # Run forever until interrupted
+
     while True:
-        # Get the last proof from the server
-        r = requests.get(url = node + "/last_proof")
-        try:
-            data = r.json()
-        except ValueError:
-            print("Error:  Non-json response")
-            print("Response returned:")
-            print(r)
+        response = start_loop()
+        if response == "reset":
             continue
-
-        threads = []
-
-        manager = multiprocessing.Manager()
-        valid_guesses = manager.dict()
-        for i in range(6):
-            thread = multiprocessing.Process(target = proof_of_work,
-                                             args = (data['proof'], i,
-                                                     valid_guesses))
-            threads.append(thread)
-            thread.start()
-
-        valid_guess = False
-
-        while not valid_guess:
-            for proc in threads:
-                if not proc.is_alive():
-                    valid_guess = True
-
-        for proc in threads:
-            if proc.is_alive():
-                proc.terminate()
-                proc.join()
-
-        valid_guess = valid_guesses.values()
-        proof = valid_guess[0]
-
-        post_data = {"proof": proof,
-                     "id": id}
-
-        r = requests.post(url = node + "/mine", json = post_data)
-        try:
-            data = r.json()
-        except ValueError:
-            print("Error:  Non-json response")
-            print("Response returned:")
-            print(r)
-            continue
-        if data.get('message') == 'New Block Forged':
-            coins_mined += 1
-            print("Total coins mined: " + str(coins_mined))
         else:
-            print(data.get('message'))
+            print("submitting proof")
+            post_data = {"proof": response,
+                         "id": id}
+
+            r = requests.post(url = node + "/mine", json = post_data)
+            try:
+                data = r.json()
+            except ValueError:
+                print("Error:  Non-json response")
+                print("Response returned:")
+                print(r)
+                continue
+            if data.get('message') == 'New Block Forged':
+                coins_mined += 1
+                print("Total coins mined: " + str(coins_mined))
+            else:
+                print(data.get('message'))
